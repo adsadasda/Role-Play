@@ -1,0 +1,305 @@
+// ==============================================================================
+// MODUŁ: Gra w Kości (Kasyno RP)
+// Kompatybilny z Prospect Roleplay Framework
+// Autor: ChatGPT 2024
+// ==============================================================================
+
+#if defined KOSTKA_LOADED
+    #endinput
+#endif
+#define KOSTKA_LOADED
+
+// ==============================================================================
+// 🔧 KONFIGURACJA
+// ==============================================================================
+#define CASINO_X 2000.0
+#define CASINO_Y 1500.0
+#define CASINO_Z 10.0
+#define CASINO_RADIUS 50.0
+
+#define MAX_BET 100000000
+#define TAX_PERCENT 5
+#define COOLDOWN_SECONDS 10
+
+// ==============================================================================
+// FUNKCJE POMOCNICZE
+// ==============================================================================
+
+// Sprawdzenie, czy gracz jest w promieniu kasyna
+stock bool:IsInCasinoArea(playerid)
+{
+    new Float:x, Float:y, Float:z;
+    GetPlayerPos(playerid, x, y, z);
+    return (GetDistanceBetweenPoints(x, y, z, CASINO_X, CASINO_Y, CASINO_Z) <= CASINO_RADIUS);
+}
+
+// Prosty rzut kostką (1–6)
+stock DiceRoll() return random(6) + 1;
+
+// Zwraca imię gracza (zachowuje spójność formatowania)
+stock GetPlayerNameEx(playerid)
+{
+    static name[MAX_PLAYER_NAME];
+    GetPlayerName(playerid, name, sizeof(name));
+    return name;
+}
+
+// Prosta funkcja daty/godziny
+stock ReturnDateTime()
+{
+    static str[64];
+    new y, m, d, h, mi, s;
+    getdate(y, m, d);
+    gettime(h, mi, s);
+    format(str, sizeof(str), "%02d/%02d/%04d %02d:%02d:%02d", d, m, y, h, mi, s);
+    return str;
+}
+
+// Zapis do loga
+stock LogDice(const text[])
+{
+    new File:f = fopen("log_dice.txt", io_append);
+    if(f)
+    {
+        new line[256];
+        format(line, sizeof(line), "[%s] %s\r\n", ReturnDateTime(), text);
+        fwrite(f, line);
+        fclose(f);
+    }
+}
+
+// Wysyłanie wiadomości do dwóch graczy
+stock DiceMessage(p1, p2, color, const text[])
+{
+    SendClientMessage(p1, color, text);
+    SendClientMessage(p2, color, text);
+}
+
+// ==============================================================================
+// 🏁 FUNKCJE LOGICZNE
+// ==============================================================================
+
+// Zakończenie gry – wypłata i reset
+stock EndDiceGame(winner, loser)
+{
+    new total = PlayerData[winner][pDiceBet] * 2;
+    new tax = (total * TAX_PERCENT) / 100;
+    new payout = total - tax;
+
+    GivePlayerCash(winner, payout);
+
+    new msg[128];
+    format(msg, sizeof(msg),
+        "Wygrałeś grę w kości o %s! (po potrąceniu %s podatku kasyna).",
+        FormatNumber(payout), FormatNumber(tax));
+    SendClientMessage(winner, COLOR_LIGHTGREEN, msg);
+
+    format(msg, sizeof(msg),
+        "Przegrałeś grę w kości. %s zgarnia %s.",
+        GetPlayerNameEx(winner), FormatNumber(payout));
+    SendClientMessage(loser, COLOR_LIGHTRED, msg);
+
+    new logText[256];
+    format(logText, sizeof(logText),
+        "%s (ID:%d) wygrał z %s (ID:%d) grę o %s, po %d rzutach. Wypłata: %s, podatek: %s.",
+        GetPlayerNameEx(winner), winner, GetPlayerNameEx(loser), loser,
+        FormatNumber(PlayerData[winner][pDiceBet]),
+        PlayerData[winner][pDiceRolls],
+        FormatNumber(payout),
+        FormatNumber(tax));
+    LogDice(logText);
+
+    PlayerData[winner][pDiceOffer] = INVALID_PLAYER_ID;
+    PlayerData[loser][pDiceOffer] = INVALID_PLAYER_ID;
+    PlayerData[winner][pDiceBet] = 0;
+    PlayerData[loser][pDiceBet] = 0;
+    PlayerData[winner][pDiceRigged] = 0;
+    PlayerData[loser][pDiceRigged] = 0;
+    PlayerData[winner][pLastBet] = gettime();
+    PlayerData[loser][pLastBet] = gettime();
+}
+
+// ==============================================================================
+// KOMENDA /sprawdzkase
+// ==============================================================================
+CMD:sprawdzkase(playerid, const params[])
+{
+    if(!IsInCasinoArea(playerid))
+        return SendClientMessage(playerid, COLOR_GREY, "Musisz znajdować się w kasynie!");
+
+    new targetid;
+    if(sscanf(params, "u", targetid))
+        return SendClientMessage(playerid, COLOR_SYNTAX, "Użycie: /sprawdzkase [gracz]");
+
+    if(!IsPlayerConnected(targetid))
+        return SendClientMessage(playerid, COLOR_ERROR, "Gracz jest offline.");
+
+    new msg[128];
+    format(msg, sizeof(msg), "%s ma %s w portfelu.", GetPlayerNameEx(targetid), FormatNumber(GetPlayerMoney(targetid)));
+    SendClientMessage(playerid, COLOR_LIGHTBLUE, msg);
+    return 1;
+}
+
+// ==============================================================================
+// KOMENDA /kostka
+// ==============================================================================
+CMD:kostka(playerid, const params[])
+{
+    if(gettime() - PlayerData[playerid][pLastBet] < COOLDOWN_SECONDS)
+    {
+        new left = COOLDOWN_SECONDS - (gettime() - PlayerData[playerid][pLastBet]);
+        new msg[64];
+        format(msg, sizeof(msg), "Poczekaj %d sekund przed następną grą w kości.", left);
+        return SendClientMessage(playerid, COLOR_YELLOW, msg);
+    }
+
+    new arg[16];
+    if(sscanf(params, "s[16]", arg))
+    {
+        SendClientMessage(playerid, COLOR_YELLOW, "Użycie: /kostka [gracz] [kwota] [rzuty] | /kostka akceptuj | /kostka odrzuc | /kostka anuluj");
+        return 1;
+    }
+
+    // ACCEPT
+    if(!strcmp(arg, "akceptuj", true))
+    {
+        new opponent = PlayerData[playerid][pDiceOffer];
+        if(opponent == INVALID_PLAYER_ID || !IsPlayerConnected(opponent))
+            return SendClientMessage(playerid, COLOR_ERROR, "Nie masz żadnej oferty gry!");
+
+        if(GetPlayerMoney(playerid) < PlayerData[opponent][pDiceBet])
+            return SendClientMessage(playerid, COLOR_ERROR, "Nie masz tyle pieniędzy!");
+
+        if(!IsInCasinoArea(playerid))
+            return SendClientMessage(playerid, COLOR_ERROR, "Musisz być w kasynie!");
+
+        SendClientMessage(playerid, COLOR_LIGHTGREEN, "Akceptujesz grę!");
+        SendClientMessage(opponent, COLOR_LIGHTGREEN, "Twój przeciwnik zaakceptował grę!");
+
+        GivePlayerCash(playerid, -PlayerData[opponent][pDiceBet]);
+        GivePlayerCash(opponent, -PlayerData[opponent][pDiceBet]);
+
+        new rolls = PlayerData[opponent][pDiceRolls];
+        new scoreP1, scoreP2;
+
+        for(new i = 1; i <= rolls; i++)
+        {
+            new d1 = DiceRoll(), d2 = DiceRoll();
+            scoreP1 += d1;
+            scoreP2 += d2;
+
+            new info[128];
+            format(info, sizeof(info), "Rzut #%d: %s wyrzuca %d | %s wyrzuca %d",
+                i, GetPlayerNameEx(opponent), d1, GetPlayerNameEx(playerid), d2);
+            DiceMessage(playerid, opponent, COLOR_WHITE, info);
+        }
+
+        if(scoreP1 == scoreP2)
+        {
+            DiceMessage(playerid, opponent, COLOR_YELLOW, "Remis! Dogrywka do skutku!");
+            do {
+                new x1 = DiceRoll(), x2 = DiceRoll();
+                new buf[128];
+                format(buf, sizeof(buf), "Dogrywka: %s - %d | %s - %d",
+                    GetPlayerNameEx(opponent), x1, GetPlayerNameEx(playerid), x2);
+                DiceMessage(playerid, opponent, COLOR_WHITE, buf);
+                if(x1 != x2)
+                {
+                    if(x1 > x2) EndDiceGame(opponent, playerid);
+                    else EndDiceGame(playerid, opponent);
+                    break;
+                }
+            } while(true);
+        }
+        else if(scoreP1 > scoreP2) EndDiceGame(opponent, playerid);
+        else EndDiceGame(playerid, opponent);
+
+        return 1;
+    }
+
+    // CANCEL OR DECLINE
+    if(!strcmp(arg, "anuluj", true) || !strcmp(arg, "odrzuc", true))
+    {
+        new target = PlayerData[playerid][pDiceOffer];
+        if(target == INVALID_PLAYER_ID) return SendClientMessage(playerid, COLOR_ERROR, "Nie masz aktywnej oferty gry!");
+
+        if(IsPlayerConnected(target))
+        {
+            new txt[128];
+            if(!strcmp(arg, "anuluj", true))
+                format(txt, sizeof(txt), "%s anulował ofertę gry.", GetPlayerNameEx(playerid));
+            else
+                format(txt, sizeof(txt), "%s odrzucił ofertę gry.", GetPlayerNameEx(playerid));
+            SendClientMessage(target, COLOR_LIGHTRED, txt);
+        }
+
+        PlayerData[target][pDiceOffer] = INVALID_PLAYER_ID;
+        PlayerData[playerid][pDiceOffer] = INVALID_PLAYER_ID;
+        return 1;
+    }
+
+    // CREATE OFFER
+    new targetid, bet, rolls;
+    if(sscanf(params, "uii", targetid, bet, rolls))
+        return SendClientMessage(playerid, COLOR_SYNTAX, "Użycie: /kostka [gracz] [kwota] [rzuty]");
+
+    if(!IsPlayerConnected(targetid))
+        return SendClientMessage(playerid, COLOR_ERROR, "Gracz jest offline!");
+
+    if(targetid == playerid)
+        return SendClientMessage(playerid, COLOR_ERROR, "Nie możesz grać sam ze sobą!");
+
+    if(PlayerData[targetid][pDiceOffer] != INVALID_PLAYER_ID)
+        return SendClientMessage(playerid, COLOR_ERROR, "Ten gracz ma już aktywną ofertę!");
+
+    if(bet <= 0 || bet > MAX_BET)
+        return SendClientMessage(playerid, COLOR_ERROR, "Zakład: 1$ – 100.000.000$.");
+
+    if(rolls < 1 || rolls > 6)
+        return SendClientMessage(playerid, COLOR_ERROR, "Liczba rzutów 1–6.");
+
+    if(!IsInCasinoArea(playerid))
+        return SendClientMessage(playerid, COLOR_ERROR, "Musisz być w kasynie!");
+
+    if(GetPlayerMoney(playerid) < bet)
+        return SendClientMessage(playerid, COLOR_ERROR, "Nie masz tylu pieniędzy!");
+
+    PlayerData[playerid][pDiceOffer] = targetid;
+    PlayerData[targetid][pDiceOffer] = playerid;
+    PlayerData[playerid][pDiceBet] = bet;
+    PlayerData[playerid][pDiceRolls] = rolls;
+
+    new msg[128];
+    format(msg, sizeof(msg), "%s oferuje Ci grę w kości o %s na %d rzutów!",
+        GetPlayerNameEx(playerid), FormatNumber(bet), rolls);
+    SendClientMessage(targetid, COLOR_YELLOW, msg);
+    SendClientMessage(targetid, COLOR_INFO, "Akceptuj: /kostka akceptuj | Odrzuć: /kostka odrzuc");
+    SendClientMessage(playerid, COLOR_LIGHTGREEN, "Oferta wysłana! /kostka anuluj aby ją anulować.");
+
+    PlayerData[playerid][pLastBet] = gettime();
+    new logEntry[256];
+    format(logEntry, sizeof(logEntry), "%s (ID:%d) zaprosił %s (ID:%d) do gry o %s (rzuty: %d).",
+        GetPlayerNameEx(playerid), playerid, GetPlayerNameEx(targetid), targetid, FormatNumber(bet), rolls);
+    LogDice(logEntry);
+    return 1;
+}
+
+// ==============================================================================
+// WEJŚCIE DO KASYNA
+// ==============================================================================
+stock CheckPlayerCasinoEntry(playerid)
+{
+    new bool:inside = IsInCasinoArea(playerid);
+    if(inside && !PlayerData[playerid][pInCasino])
+    {
+        PlayerData[playerid][pInCasino] = true;
+        SendClientMessage(playerid, COLOR_YELLOW, "Witamy w kasynie! Życzymy samych wygranych!");
+        SendClientMessage(playerid, COLOR_WHITE, "Graj rozważnie — szczęście bywa zdradliwe.");
+    }
+    else if(!inside && PlayerData[playerid][pInCasino])
+    {
+        PlayerData[playerid][pInCasino] = false;
+    }
+}
+
+// ==============================================================================
